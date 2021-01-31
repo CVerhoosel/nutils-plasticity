@@ -100,8 +100,7 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
   ns.Δuload = Δuload
   ns.mu     = E/(1-nu**2)*((1-nu)/2)
   ns.λ      = E/(1-nu**2)*nu
-  ns.delta  = function.eye(domain.ndims)
-  ns.C_ijkl = 'mu ( delta_ik delta_jl + delta_il delta_jk ) + λ delta_ij delta_kl'
+  ns.C_ijkl = 'mu ( δ_ik δ_jl + δ_il δ_jk ) + λ δ_ij δ_kl'
 
   # We make use of a Lagrange finite element basis of arbitrary `degree`. Since we
   # approximate the displacement field, the basis functions are vector-valued. Both
