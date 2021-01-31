@@ -427,7 +427,7 @@ class _PlasticStrain(evaluable.Array):
     dεpdε = evaluable.Greater(Δλ, numpy.spacing(1000)*evaluable.ones_like(Δλ))[:,_,_,_,_]*dεpdε
 
     # We finally apply the chain rule to compute the requested derivative:
-    return (dεpdε[:,:,:,:,:,_]*evaluable.derivative(self.ε, var, seen)[:,_,_,:,:,:]).sum((3,4))
+    return (dεpdε[(...,)+(_,)*var.ndim]*evaluable.derivative(self.ε, var, seen)[:,_,_]).sum((3,4))
 
 
 # Supplementary function definitions
