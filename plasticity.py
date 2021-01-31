@@ -132,6 +132,14 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
   ns.εe_ij = 'ε_ij - εp_ij'
   ns.σ_ij  = 'C_ijkl εe_kl'
 
+  # Since the stresses are defined in the integration points only, a
+  # post-processing step is involved that transfers the stress information to
+  # the nodal points. `σyypp` is the post-processed stress in terms of an
+  # argument with the same name.
+
+  ns.linbasis = domain.basis('std', degree=1)
+  ns.σyypp = 'linbasis_n ?σyypp_n'
+
   # Note that the plasticity model is implemented through the user-defined function `PlasticStrain`,
   # which implements the actual yielding model including a standard return mapping algorithm. This
   # function is discussed in detail below.
@@ -140,13 +148,13 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
   #
   #   r_n = ∫_Ω (∂N_ni/∂x_j) σ_ij dΩ
 
-  res = domain.integral('basis_ni,j σ_ij d:x' @ ns, degree=2)
+  res = domain.integral('basis_ni,j σ_ij J(x)' @ ns, degree=2)
 
   # The problem formulation is completed by supplementing prescribed displacement boundary conditions
   # (for a load step), which are computed in the standard manner:
 
-  sqr  = domain.boundary['hsymmetry,vsymmetry'].integral('(u_k n_k)^2 d:x' @ ns, degree=2)
-  sqr += domain.boundary['load'].integral('(u_k n_k - Δuload)^2 d:x' @ ns, degree=2)
+  sqr  = domain.boundary['hsymmetry,vsymmetry'].integral('(u_k n_k)^2 J(x)' @ ns, degree=2)
+  sqr += domain.boundary['load'].integral('(u_k n_k - Δuload)^2 J(x)' @ ns, degree=2)
   cons = solver.optimize('u', sqr, droptol=1e-15)
 
   # Incremental-iterative solution procedure
@@ -156,7 +164,7 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
   # for the first load step, we define the previous load step state as the solution
   # vector corresponding to a negative elastic loading step.
 
-  u0 = -solver.solve_linear('u', domain.integral('basis_ni,j C_ijkl ε_kl d:x' @ ns, degree=2), constrain=cons)
+  u0 = -solver.solve_linear('u', domain.integral('basis_ni,j C_ijkl ε_kl J(x)' @ ns, degree=2), constrain=cons)
   state = dict(
     u0  = u0,
     u   = numpy.zeros_like(u0),
@@ -188,14 +196,13 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
       # component - and a contour plot showing the 'σ_{yy}' stress component on a
       # deformed mesh. Note that since the stresses are defined in the integration points
       # only, a post-processing step is involved that transfers the stress information to
-      # the nodal points.
-      εyymax = gauss.eval(ns.ε[1,1], arguments=state).max()
+      # the nodal points (argument `σyypp`).
+      εyymax = gauss.eval('ε_11' @ ns, arguments=state).max()
 
-      basis = domain.basis('std', degree=1)
-      bw, b = domain.integrate([basis * ns.σ[1,1] * function.J(geom), basis * function.J(geom)], degree=2, arguments=state)
-      σyy = basis.dot(bw / b)
+      bw, b = domain.integrate(['linbasis_n σ_11 J(x)', 'linbasis_n J(x)'] @ ns, degree=2, arguments=state)
+      state['σyypp'] = bw / b
 
-      uyload, σyyload = domain.boundary['load'].integrate(['u_1 d:x'@ns,σyy * function.J(geom)], degree=2, arguments=state)
+      uyload, σyyload = domain.boundary['load'].integrate(['u_1 J(x)', 'σyypp J(x)'] @ ns, degree=2, arguments=state)
       uyload /= Wdomain
       σyyload /= Wdomain
       fddata[step,0] = (E*εyymax)/σyield
@@ -211,7 +218,7 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
         ax.grid()
 
       bezier = domain.sample('bezier', 3)
-      points, uvals, σyyvals = bezier.eval(['(x_i + 25 u_i)' @ ns, ns.u, σyy], arguments=state)
+      points, uvals, σyyvals = bezier.eval(['(x_i + 25 u_i)', 'u_i', 'σyypp'] @ ns, arguments=state)
       with export.mplfigure('stress.png') as fig:
         ax = fig.add_subplot(111, aspect='equal', xlabel=r'$x$ [mm]', ylabel=r'$y$ [mm]')
         im = ax.tripcolor(points[:,0]/unit('mm'), points[:,1]/unit('mm'), bezier.tri, σyyvals/unit('MPa'), shading='gouraud', cmap='jet')
