@@ -100,8 +100,7 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
   ns.Δuload = Δuload
   ns.mu     = E/(1-nu**2)*((1-nu)/2)
   ns.λ      = E/(1-nu**2)*nu
-  ns.delta  = function.eye(domain.ndims)
-  ns.C_ijkl = 'mu ( delta_ik delta_jl + delta_il delta_jk ) + λ delta_ij delta_kl'
+  ns.C_ijkl = 'mu ( δ_ik δ_jl + δ_il δ_jk ) + λ δ_ij δ_kl'
 
   # We make use of a Lagrange finite element basis of arbitrary `degree`. Since we
   # approximate the displacement field, the basis functions are vector-valued. Both
@@ -110,8 +109,8 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
 
   ns.basis = domain.basis('std',degree=degree).vector(domain.ndims)
 
-  ns.u0_i = 'basis_ni ?lhs0_n'
-  ns.u_i  = 'basis_ni ?lhs_n'
+  ns.u0_i = 'basis_ni ?u0_n'
+  ns.u_i  = 'basis_ni ?u_n'
 
   # This simulation is based on a standard elasto-plasticity model. In this
   # model the *total strain*, ε_kl = ½ (∂u_k/∂x_l + ∂u_l/∂x_k)', is comprised of an
@@ -133,6 +132,14 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
   ns.εe_ij = 'ε_ij - εp_ij'
   ns.σ_ij  = 'C_ijkl εe_kl'
 
+  # Since the stresses are defined in the integration points only, a
+  # post-processing step is involved that transfers the stress information to
+  # the nodal points. `σyypp` is the post-processed stress in terms of an
+  # argument with the same name.
+
+  ns.linbasis = domain.basis('std', degree=1)
+  ns.σyypp = 'linbasis_n ?σyypp_n'
+
   # Note that the plasticity model is implemented through the user-defined function `PlasticStrain`,
   # which implements the actual yielding model including a standard return mapping algorithm. This
   # function is discussed in detail below.
@@ -141,26 +148,29 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
   #
   #   r_n = ∫_Ω (∂N_ni/∂x_j) σ_ij dΩ
 
-  res = domain.integral('basis_ni,j σ_ij d:x' @ ns, degree=2)
+  res = domain.integral('basis_ni,j σ_ij J(x)' @ ns, degree=2)
 
   # The problem formulation is completed by supplementing prescribed displacement boundary conditions
   # (for a load step), which are computed in the standard manner:
 
-  sqr  = domain.boundary['hsymmetry,vsymmetry'].integral('(u_k n_k)^2 d:x' @ ns, degree=2)
-  sqr += domain.boundary['load'].integral('(u_k n_k - Δuload)^2 d:x' @ ns, degree=2)
-  cons = solver.optimize('lhs', sqr, droptol=1e-15)
+  sqr  = domain.boundary['hsymmetry,vsymmetry'].integral('(u_k n_k)^2 J(x)' @ ns, degree=2)
+  sqr += domain.boundary['load'].integral('(u_k n_k - Δuload)^2 J(x)' @ ns, degree=2)
+  cons = solver.optimize('u', sqr, droptol=1e-15)
 
   # Incremental-iterative solution procedure
   # ========================================
-  # We initialize the solution vector for the first load step `lhs` and solution vector
-  # of the previous load step `lhs0`. Note that, in order to construct a predictor step
+  # We initialize the solution vector for the first load step `u` and solution vector
+  # of the previous load step `u0`. Note that, in order to construct a predictor step
   # for the first load step, we define the previous load step state as the solution
   # vector corresponding to a negative elastic loading step.
 
-  lhs0 = -solver.solve_linear('lhs', domain.integral('basis_ni,j C_ijkl ε_kl d:x' @ ns, degree=2), constrain=cons)
-  lhs  = numpy.zeros_like(lhs0)
-  εp0  = numpy.zeros((gauss.npoints,)+ns.εp0.shape)
-  κ0   = numpy.zeros((gauss.npoints,)+ns.κ0.shape)
+  u0 = -solver.solve_linear('u', domain.integral('basis_ni,j C_ijkl ε_kl J(x)' @ ns, degree=2), constrain=cons)
+  state = dict(
+    u0  = u0,
+    u   = numpy.zeros_like(u0),
+    εp0 = numpy.zeros((gauss.npoints,)+ns.εp0.shape),
+    κ0  = numpy.zeros((gauss.npoints,)+ns.κ0.shape),
+  )
 
   # To store the force-dispalcement data we initialize an empty data array with the
   # inital state solution substituted in the first row.
@@ -173,28 +183,26 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
   with treelog.iter.fraction('step', range(nsteps)) as counter:
     for step in counter:
 
-      # The solution of the previous load step is set to `lhs0`, and the Newton solution
+      # The solution of the previous load step is set to `u0`, and the Newton solution
       # procedure is initialized by extrapolation of the state vector:
-      lhs_init = lhs + (lhs-lhs0)
-      lhs0     = lhs
+      state['u'], state['u0'] = state['u'] + (state['u'] - state['u0']), state['u']
 
-      # The non-linear system of equations is solved for `lhs` using Newton iterations,
+      # The non-linear system of equations is solved for `u` using Newton iterations,
       # where the `step` variable is used to scale the incremental constraints.
-      lhs = solver.newton(target='lhs', residual=res, constrain=cons*step, lhs0=lhs_init, arguments={'lhs0':lhs0,'εp0':εp0,'κ0':κ0}).solve(tol=1e-6)
+      state = solver.newton(('u',), (res,), constrain=cons*step, arguments=state).solve(tol=1e-6)
 
       # The computed solution is post-processed in the form of a loading curve - which
       # plots the normalized mean stress versus the maximum 'ε_{yy}' strain
       # component - and a contour plot showing the 'σ_{yy}' stress component on a
       # deformed mesh. Note that since the stresses are defined in the integration points
       # only, a post-processing step is involved that transfers the stress information to
-      # the nodal points.
-      εyymax = gauss.eval(ns.ε[1,1], arguments=dict(lhs=lhs)).max()
+      # the nodal points (argument `σyypp`).
+      εyymax = gauss.eval('ε_11' @ ns, arguments=state).max()
 
-      basis = domain.basis('std', degree=1)
-      bw, b = domain.integrate([basis * ns.σ[1,1] * function.J(geom), basis * function.J(geom)], degree=2, arguments=dict(lhs=lhs,lhs0=lhs0,εp0=εp0,κ0=κ0))
-      σyy = basis.dot(bw / b)
+      bw, b = domain.integrate(['linbasis_n σ_11 J(x)', 'linbasis_n J(x)'] @ ns, degree=2, arguments=state)
+      state['σyypp'] = bw / b
 
-      uyload, σyyload = domain.boundary['load'].integrate(['u_1 d:x'@ns,σyy * function.J(geom)], degree=2, arguments=dict(lhs=lhs,εp0=εp0,κ0=κ0))
+      uyload, σyyload = domain.boundary['load'].integrate(['u_1 J(x)', 'σyypp J(x)'] @ ns, degree=2, arguments=state)
       uyload /= Wdomain
       σyyload /= Wdomain
       fddata[step,0] = (E*εyymax)/σyield
@@ -210,7 +218,7 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
         ax.grid()
 
       bezier = domain.sample('bezier', 3)
-      points, uvals, σyyvals = bezier.eval(['(x_i + 25 u_i)' @ ns, ns.u, σyy], arguments=dict(lhs=lhs))
+      points, uvals, σyyvals = bezier.eval(['(x_i + 25 u_i)', 'u_i', 'σyypp'] @ ns, arguments=state)
       with export.mplfigure('stress.png') as fig:
         ax = fig.add_subplot(111, aspect='equal', xlabel=r'$x$ [mm]', ylabel=r'$y$ [mm]')
         im = ax.tripcolor(points[:,0]/unit('mm'), points[:,1]/unit('mm'), bezier.tri, σyyvals/unit('MPa'), shading='gouraud', cmap='jet')
@@ -227,10 +235,9 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
       #
       #   Δκ = √(Δεp_ij Δεp_ij)
 
-      Δεp = ns.εp-ns.εp0
-      Δκ  = function.sqrt((Δεp*Δεp).sum((0,1)))
-      κ0  = gauss.eval(ns.κ0+Δκ, arguments=dict(lhs0=lhs0,lhs=lhs,εp0=εp0,κ0=κ0))
-      εp0 = gauss.eval(ns.εp, arguments=dict(lhs0=lhs0,lhs=lhs,εp0=εp0,κ0=κ0))
+      ns.Δεp = 'εp - εp0'
+      ns.Δκ  = 'sqrt(Δεp_ij Δεp_ij)'
+      state['κ0'], state['εp0']  = gauss.eval(['κ0 + Δκ', 'εp'] @ ns, arguments=state)
 
 # The plastic strain function
 # ===========================
@@ -428,7 +435,7 @@ class _PlasticStrain(evaluable.Array):
     dεpdε = evaluable.Greater(Δλ, numpy.spacing(1000)*evaluable.ones_like(Δλ))[:,_,_,_,_]*dεpdε
 
     # We finally apply the chain rule to compute the requested derivative:
-    return (dεpdε[:,:,:,:,:,_]*evaluable.derivative(self.ε, var, seen)[:,_,_,:,:,:]).sum((3,4))
+    return (dεpdε[(...,)+(_,)*var.ndim]*evaluable.derivative(self.ε, var, seen)[:,_,_]).sum((3,4))
 
 
 # Supplementary function definitions
