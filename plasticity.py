@@ -188,7 +188,7 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
       # deformed mesh. Note that since the stresses are defined in the integration points
       # only, a post-processing step is involved that transfers the stress information to
       # the nodal points.
-      εyymax = gauss.eval(ns.ε[1,1], arguments=dict(lhs=lhs)).max()
+      εyymax = gauss.eval(ns.ε[1,1], lhs=lhs).max()
 
       basis = domain.basis('std', degree=1)
       bw, b = domain.integrate([basis * ns.σ[1,1] * function.J(geom), basis * function.J(geom)], degree=2, arguments=dict(lhs=lhs,lhs0=lhs0,εp0=εp0,κ0=κ0))
@@ -210,7 +210,7 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
         ax.grid()
 
       bezier = domain.sample('bezier', 3)
-      points, uvals, σyyvals = bezier.eval(['(x_i + 25 u_i)' @ ns, ns.u, σyy], arguments=dict(lhs=lhs))
+      points, uvals, σyyvals = bezier.eval(['(x_i + 25 u_i)' @ ns, ns.u, σyy], lhs=lhs)
       with export.mplfigure('stress.png') as fig:
         ax = fig.add_subplot(111, aspect='equal', xlabel=r'$x$ [mm]', ylabel=r'$y$ [mm]')
         im = ax.tripcolor(points[:,0]/unit('mm'), points[:,1]/unit('mm'), bezier.tri, σyyvals/unit('MPa'), shading='gouraud', cmap='jet')
@@ -229,8 +229,8 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
 
       Δεp = ns.εp-ns.εp0
       Δκ  = function.sqrt((Δεp*Δεp).sum((0,1)))
-      κ0  = gauss.eval(ns.κ0+Δκ, arguments=dict(lhs0=lhs0,lhs=lhs,εp0=εp0,κ0=κ0))
-      εp0 = gauss.eval(ns.εp, arguments=dict(lhs0=lhs0,lhs=lhs,εp0=εp0,κ0=κ0))
+      κ0  = gauss.eval(ns.κ0+Δκ, lhs0=lhs0,lhs=lhs,εp0=εp0,κ0=κ0)
+      εp0 = gauss.eval(ns.εp, lhs0=lhs0,lhs=lhs,εp0=εp0,κ0=κ0)
 
 # The plastic strain function
 # ===========================
