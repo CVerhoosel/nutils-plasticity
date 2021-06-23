@@ -16,7 +16,7 @@
 #
 # We start by importing the necessary modules. Note that the `function` module is
 # imported in order to construct a dedicated function for the plastic strain evolution.
-from nutils import mesh, solver, types, cli, export, numeric, function, evaluable, types
+from nutils import mesh, solver, types, cli, export, numeric, function, types
 import numpy, treelog, pathlib, typing
 from matplotlib import collections
 _ = numpy.newaxis
@@ -239,7 +239,7 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
 # *total strain* level, the yield function is used to determine the corresponding
 # *plastic strain*.
 
-class PlasticStrain(function.Array):
+class PlasticStrain(function.Custom):
   '''Von Mises plane stress with strain hardening
 
   Plastic strain tensor function for a plane stress Von Mises model with strain hardening.
@@ -268,30 +268,15 @@ class PlasticStrain(function.Array):
       Maximum number of return mapping iterations
   '''
 
-  def __init__(self, ε: function.Array, ε0: function.Array, εp0: function.Array, κ0: function.Array, E:unit['Pa'], nu:float, σyield:unit['Pa'], h:unit['Pa'], rtol:float=1e-8, maxiter:int=20) -> None:
-    self.ε       = ε
-    self.ε0      = ε0
-    self.εp0     = εp0
-    self.κ0      = κ0
-    self.E       = E
-    self.nu      = nu
-    self.σyield  = σyield
-    self.h       = h
-    self.rtol    = rtol
-    self.maxiter = maxiter
-
-    super().__init__(ε.shape, ε.dtype)
-
-  def lower(self, **kwargs: typing.Any) -> evaluable.Array:
-    return _PlasticStrain(self.ε.lower(**kwargs), self.ε0.lower(**kwargs), self.εp0.lower(**kwargs), self.κ0.lower(**kwargs), self.E, self.nu, self.σyield, self.h, self.rtol, self.maxiter)
-
-
-class _PlasticStrain(evaluable.Array):
-
   __slots__ = 'rtol', 'maxiter', 'δ', 'Isym', 'C', 'σyield', 'h', 'ε', 'ε0', 'εp0', 'κ0', 'P'
 
-  def __init__(self, ε: evaluable.Array, ε0: evaluable.Array, εp0: evaluable.Array, κ0: evaluable.Array, E:unit['Pa'], nu:float, σyield:unit['Pa'], h:unit['Pa'], rtol:float, maxiter:int):
-    assert ε.ndim == 3 and ε.shape[1] == ε.shape[2] == 2
+  def __init__(self, ε: function.Array, ε0: function.Array, εp0: function.Array, κ0: function.Array, E:unit['Pa'], nu:float, σyield:unit['Pa'], h:unit['Pa'], rtol:float = 1e-8, maxiter:int = 20):
+    ε = function.asarray(ε)
+    ε0 = function.asarray(ε0)
+    εp0 = function.asarray(εp0)
+    κ0 = function.asarray(κ0)
+
+    assert ε.shape == (2, 2)
 
     # We set the numerical parameters for the return mapping algorithm:
     self.rtol    = rtol
@@ -319,7 +304,7 @@ class _PlasticStrain(evaluable.Array):
 
     # The constructor of the base class is finally called to conclude the
     # constructor:
-    super().__init__(args=[ε,ε0,εp0,κ0], shape=ε.shape, dtype=float)
+    super().__init__(args=[ε,ε0,εp0,κ0,E,nu,σyield,h,rtol,maxiter], shape=ε.shape, dtype=float)
 
   # Plastic strain evaluation
   # -------------------------
@@ -327,7 +312,7 @@ class _PlasticStrain(evaluable.Array):
   # material to be elastic. If the yield criterion is violated the `_returnmap`
   # function is called to compute the required update of the plastic strain so
   # that the stress state is on the yield surface.
-  def evalf(self, ε, ε0, εp0, κ0):
+  def evalf(self, ε: numpy.ndarray, ε0: numpy.ndarray, εp0: numpy.ndarray, κ0: numpy.ndarray, E:unit['Pa'], nu:float, σyield:unit['Pa'], h:unit['Pa'], rtol:float, maxiter:int) -> numpy.ndarray:
     ε, ε0, εp0 = numpy.broadcast_arrays(ε, ε0, εp0)
     εp = εp0.copy()
     σ = numpy.einsum('ijkl,pkl->pij', self.C, ε-εp0)
@@ -397,38 +382,38 @@ class _PlasticStrain(evaluable.Array):
 
   # Consistent tangent
   # ------------------
-  def _derivative(self, var, seen):
+  def partial_derivative(self, iarg, ε: function.Array, ε0: function.Array, εp0: function.Array, κ0: function.Array, E:unit['Pa'], nu:float, σyield:unit['Pa'], h:unit['Pa'], rtol:float, maxiter:int) -> function.Array:
 
-    # Function objects are created for the stress, the second invariant
-    # of its deviatoric part, and the derivatives thereof:
-    σ    = ( self.C[_,:,:,:,:]*(self.ε-self)[:,_,_,:,:] ).sum((3,4)) # σ_Nij = C_ijkl (ε_Nkl - εp_Nkl)
-    J2   = ((σ*σ).sum((1,2)) - (1./3.)*((σ*self.δ[_,:,:]).sum((1,2)))**2) # J2_N = ½ (σ_Nij σ_Nij - ⅓ σ_Nii^2)
-    dJ2  = σ - (1./3.)*((σ*self.δ[_,:,:]).sum((1,2)))[:,_,_]*self.δ[_,:,:] # dJ2_Nkl = σ_Nkl - ⅓ σ_Nii δ_kl
-    d2J2 = self.Isym[_,:,:,:,:] - (1./3.)*self.δ[_,:,:,_,_]*self.δ[_,_,_,:,:] # d2J2_Nklmn = Isym_klmn - ⅓ δ_kl δ_mn
+    if iarg == 0:
+      # Function objects are created for the stress, the second invariant
+      # of its deviatoric part, and the derivatives thereof:
+      σ    = ( self.C[:,:,:,:]*(ε-self)[_,_,:,:] ).sum((2,3)) # σ_Nij = C_ijkl (ε_Nkl - εp_Nkl)
+      J2   = ((σ*σ).sum((0,1)) - (1./3.)*((σ*self.δ[:,:]).sum((0,1)))**2) # J2_N = ½ (σ_Nij σ_Nij - ⅓ σ_Nii^2)
+      dJ2  = σ - (1./3.)*((σ*self.δ[:,:]).sum((0,1)))[_,_]*self.δ[:,:] # dJ2_Nkl = σ_Nkl - ⅓ σ_Nii δ_kl
+      d2J2 = self.Isym[:,:,:,:] - (1./3.)*self.δ[:,:,_,_]*self.δ[_,_,:,:] # d2J2_Nklmn = Isym_klmn - ⅓ δ_kl δ_mn
 
-    # Functions are then created for the flow direction and its derivative:
-    nf  = (1./evaluable.sqrt(2.*J2[:,_,_]))*dJ2 # nf_Nkl = '(1 / sqrt(2 J2_N)) dJ2_Nkl'
-    dnf = (1./evaluable.sqrt(2.*J2[:,_,_,_,_]))*(d2J2-(1./(2.*J2[:,_,_,_,_]))*dJ2[:,:,:,_,_]*dJ2[:,_,_,:,:]) # dnf_Nklmn = (1 / √(2 J2_N)) (d2J2_Nklmn - (1 / (2 J2_N)) dJ2_Nkl dJ2_Nmn)
+      # Functions are then created for the flow direction and its derivative:
+      nf  = (1./function.sqrt(2.*J2[_,_]))*dJ2 # nf_Nkl = '(1 / sqrt(2 J2_N)) dJ2_Nkl'
+      dnf = (1./function.sqrt(2.*J2[_,_,_,_]))*(d2J2-(1./(2.*J2[_,_,_,_]))*dJ2[:,:,_,_]*dJ2[_,_,:,:]) # dnf_Nklmn = (1 / √(2 J2_N)) (d2J2_Nklmn - (1 / (2 J2_N)) dJ2_Nkl dJ2_Nmn)
 
-    # The plastic multiplier can then be computed as:
-    Δεp = self-self.εp0 # Δεp_Nkl = εp_Nkl - εp0_Nkl
-    Δλ  = (Δεp*nf).sum((1,2))/((nf*nf).sum((1,2))) # Δλ_N = (Δεp_Nkl nf_Nkl) / (nf_Nmn nf_Nmn)
+      # The plastic multiplier can then be computed as:
+      Δεp = self-εp0 # Δεp_Nkl = εp_Nkl - εp0_Nkl
+      Δλ  = (Δεp*nf).sum((0,1))/((nf*nf).sum((0,1))) # Δλ_N = (Δεp_Nkl nf_Nkl) / (nf_Nmn nf_Nmn)
 
-    # The consistent tangent can then be computed as:
-    N     = nf-evaluable.sqrt(2./(3.*(nf[:,:,:,_,_]*nf[:,:,:,_,_]).sum((1,2))))*self.h*Δλ[:,_,_]*((nf[:,:,:,_,_]*dnf).sum((1,2))) # N_Nkl = nf_Nkl - √(⅔ / nf_Nij nf_Nij) h Δλ_N nf_Nmn dnf_Nmnkl
-    B     = self.Isym[_,:,:,:,:]+Δλ[:,_,_,_,_]*((self.C[_,:,:,:,:,_,_]*dnf[:,_,_,:,:,:,:]).sum((3,4))) # B_Nklmn = Isym_klmn + Δλ_N C_klij dnf_Nijmn
-    Binv  = (self.P[_,:,_,:,:,_,_]*(evaluable.inverse((self.P[_,:,_,:,:,_,_]*B[:,_,_,:,:,:,:]*self.P[_,_,:,_,_,:,:]).sum((3,4,5,6))))[:,:,:,_,_,_,_]*self.P[_,_,:,_,_,:,:]).sum((1,2)) # Binv_Nijkl = P_aij inv(P_aqr B_Nqrst P_bst) P_bkl
-    Cstar = (N[:,:,:,_,_,_,_]*Binv[:,:,:,:,:,_,_]*self.C[_,_,_,:,:,:,:]*nf[:,_,_,_,_,:,:]).sum((1,2,3,4,5,6))+evaluable.sqrt(2.*((nf*nf).sum((1,2)))/3.)*self.h # Cstar_N = N_Nkl Binv_Nklmn C_mnpq nf_Npq + √(⅔ nf_Nij nf_Nij) h
-    dΔλdε = ((((N[:,:,:,_,_]*Binv).sum((1,2)))[:,:,:,_,_]*self.C[_,:,:,:,:]).sum((1,2)))/Cstar[:,_,_] # dΔλdε_Nkl = N_Nij Binv_Nijmn C_mnkl / Cstar_N
-    dσdε  = (Binv[:,:,:,:,:,_,_]*self.C[_,_,_,:,:,:,:]).sum((3,4))-((Binv[:,:,:,:,:,_,_]*self.C[_,_,_,:,:,:,:]*nf[:,_,_,_,_,:,:]).sum((3,4,5,6)))[:,:,:,_,_]*dΔλdε[:,_,_,:,:] # dσdε_Nijkl = Binv_Nijpq C_pqkl - Binv_Nijpq C_pqrs nf_Nrs dΔλdε_Nkl
-    dεpdε = nf[:,:,:,_,_]*dΔλdε[:,_,_,:,:]+Δλ[:,_,_,_,_]*((dnf[:,:,:,:,:,_,_]*dσdε[:,_,_,:,:,:,:]).sum((3,4))) # dεpdε_Nijkl = nf_Nij dΔλdε_Nkl + Δλ_N dnf_Nijrs dσdε_Nrskl
+      # The consistent tangent can then be computed as:
+      N     = nf-function.sqrt(2./(3.*(nf[:,:,_,_]*nf[:,:,_,_]).sum((0,1))))*self.h*Δλ[_,_]*((nf[:,:,_,_]*dnf).sum((0,1))) # N_Nkl = nf_Nkl - √(⅔ / nf_Nij nf_Nij) h Δλ_N nf_Nmn dnf_Nmnkl
+      B     = self.Isym[:,:,:,:]+Δλ[_,_,_,_]*((self.C[:,:,:,:,_,_]*dnf[_,_,:,:,:,:]).sum((2,3))) # B_Nklmn = Isym_klmn + Δλ_N C_klij dnf_Nijmn
+      Binv  = (self.P[:,_,:,:,_,_]*(function.inverse((self.P[:,_,:,:,_,_]*B[_,_,:,:,:,:]*self.P[_,:,_,_,:,:]).sum((2,3,4,5))))[:,:,_,_,_,_]*self.P[_,:,_,_,:,:]).sum((0,1)) # Binv_Nijkl = P_aij inv(P_aqr B_Nqrst P_bst) P_bkl
+      Cstar = (N[:,:,_,_,_,_]*Binv[:,:,:,:,_,_]*self.C[_,_,:,:,:,:]*nf[_,_,_,_,:,:]).sum((0,1,2,3,4,5))+function.sqrt(2.*((nf*nf).sum((0,1)))/3.)*self.h # Cstar_N = N_Nkl Binv_Nklmn C_mnpq nf_Npq + √(⅔ nf_Nij nf_Nij) h
+      dΔλdε = ((((N[:,:,_,_]*Binv).sum((0,1)))[:,:,_,_]*self.C[:,:,:,:]).sum((0,1)))/Cstar[_,_] # dΔλdε_Nkl = N_Nij Binv_Nijmn C_mnkl / Cstar_N
+      dσdε  = (Binv[:,:,:,:,_,_]*self.C[_,_,:,:,:,:]).sum((2,3))-((Binv[:,:,:,:,_,_]*self.C[_,_,:,:,:,:]*nf[_,_,_,_,:,:]).sum((2,3,4,5)))[:,:,_,_]*dΔλdε[_,_,:,:] # dσdε_Nijkl = Binv_Nijpq C_pqkl - Binv_Nijpq C_pqrs nf_Nrs dΔλdε_Nkl
+      dεpdε = nf[:,:,_,_]*dΔλdε[_,_,:,:]+Δλ[_,_,_,_]*((dnf[:,:,:,:,_,_]*dσdε[_,_,:,:,:,:]).sum((2,3))) # dεpdε_Nijkl = nf_Nij dΔλdε_Nkl + Δλ_N dnf_Nijrs dσdε_Nrskl
 
-    # Note that, based on the value of the plastic multiplier increment, either the
-    # elastic (zero) or the plastic tangent derivative is used:
-    dεpdε = evaluable.Greater(Δλ, numpy.spacing(1000)*evaluable.ones_like(Δλ))[:,_,_,_,_]*dεpdε
-
-    # We finally apply the chain rule to compute the requested derivative:
-    return (dεpdε[:,:,:,:,:,_]*evaluable.derivative(self.ε, var, seen)[:,_,_,:,:,:]).sum((3,4))
+      # Note that, based on the value of the plastic multiplier increment, either the
+      # elastic (zero) or the plastic tangent derivative is used:
+      return function.greater(Δλ, numpy.spacing(1000)*function.ones(Δλ.shape))[_,_,_,_]*dεpdε
+    else:
+      raise NotImplementedError
 
 
 # Supplementary function definitions
