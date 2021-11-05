@@ -102,7 +102,7 @@ def main(fname: str, degree: int, Δuload: unit['mm'], nsteps: int, E: unit['GPa
   ns.λ      = E/(1-nu**2)*nu
   ns.C_ijkl = 'mu ( δ_ik δ_jl + δ_il δ_jk ) + λ δ_ij δ_kl'
 
-  # We make use of a Lagrange finite element basis of arbitrary `degree`. Since we
+  # We make use of a finite element basis of arbitrary `degree`. Since we
   # approximate the displacement field, the basis functions are vector-valued. Both
   # the displacement field at the current load step `u` and displacement field of the
   # previous load step `u0` are approximated using this basis:
